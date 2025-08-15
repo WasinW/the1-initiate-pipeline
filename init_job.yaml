@@ -1,0 +1,50 @@
+projectId: your-gcp-project-id
+datasetExternal: raw_init
+datasetFinal: dwh
+gcsBucket: your-destination-bucket
+
+# When set to `auto`, the pipeline chooses STS by default and falls back to
+# Dataflow or Dataproc based on your thresholds.  You can override per
+# table.  Valid values: auto | sts | dataflow | dataproc
+defaultEngine: auto
+
+tables:
+  - name: sales_txn
+    source:
+      s3Bucket: your-source-bucket
+      prefix: emr/sales_txn/
+      format: parquet
+      schemaSource: glue
+      glue:
+        database: dwh
+        table: sales_txn
+    destination:
+      gcsPrefix: landing/sales_txn/
+      biglake:
+        hivePartitioning: true
+        hivePartitionUriPrefix: gs://your-destination-bucket/landing/sales_txn/
+      finalTable:
+        dataset: dwh
+        table: sales_txn
+      columnMapping:
+        # map expressions to destination columns
+        - expr: order_id
+          as: order_id
+        - expr: cast(amount as numeric)
+          as: amount
+        - expr: dt
+          as: dt
+    engineOverrides:
+      preferred: sts
+      fallbacks:
+        - dataflow
+        - dataproc
+    thresholds:
+      maxSingleObjectTiB: 5
+      minCompactTargetMB: 256
+  # Add more tables here as needed
+
+validation:
+  compareWith: s3           # s3 | redshift
+  checksumColumns: ["order_id", "amount", "dt"]
+  sampleRatio: 0.0          # 0 = no sampling, >0 = sample random records
