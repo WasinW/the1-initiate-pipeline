@@ -8,6 +8,14 @@ import com.fasterxml.jackson.dataformat.yaml.YAMLFactory
 // Google Cloud clients
 import com.google.cloud.bigquery.{BigQuery, BigQueryOptions, TableId}
 import com.google.cloud.storage.transfer.v1.{StorageTransferServiceClient, TransferJob}
+// Additional imports for STS transfer job definition
+import com.google.cloud.secretmanager.v1.{SecretManagerServiceClient, SecretVersionName}
+import com.google.storagetransfer.v1.proto.TransferProto
+import com.google.storagetransfer.v1.proto.TransferProto.CreateTransferJobRequest
+import com.google.storagetransfer.v1.proto.TransferTypes
+import com.google.storagetransfer.v1.proto.TransferTypes.{TransferOptions, ObjectConditions, TransferSpec, Schedule}
+import com.google.storagetransfer.v1.proto.TransferTypes.{AwsS3Data, AwsAccessKey, GcsData, TransferJob => ProtoTransferJob}
+import com.google.type.{Date => ProtoDate, TimeOfDay}
 
 /**
  * Entry point for the initiation pipeline.  This Spark driver (though Spark
@@ -159,9 +167,141 @@ object Main {
    */
   def runStsCopy(cfg: Config, tableCfg: TableConfig, stsClient: StorageTransferServiceClient): Unit = {
     println(s"Starting STS copy for ${tableCfg.name} from s3://${tableCfg.source.s3Bucket}/${tableCfg.source.prefix} to gs://${cfg.gcsBucket}/${tableCfg.destination.gcsPrefix} …")
-    // TODO: build a TransferJob with schedule set to run immediately
-    // and call stsClient.createTransferJob(job)
-    // Poll job status until done
+
+    // ---------------------------------------------------------------------------
+    // Retrieve AWS credentials from Secret Manager.  This implementation assumes
+    // two secrets exist in the same project: "aws-access-key-id" and
+    // "aws-secret-access-key".  Each secret should have at least one version
+    // with the AWS key/secret as plain text.  In production you may want to
+    // parameterise the secret names or include them in the YAML config.
+    // ---------------------------------------------------------------------------
+    val secretClient = SecretManagerServiceClient.create()
+    def getSecretPayload(secretName: String): String = {
+      // Build the resource name for the latest version of the secret
+      val secretVersion = SecretVersionName.of(cfg.projectId, secretName, "latest")
+      val response = secretClient.accessSecretVersion(secretVersion)
+      response.getPayload.getData.toStringUtf8.trim
+    }
+    val awsAccessKeyId: String = getSecretPayload("aws-access-key-id")
+    val awsSecretAccessKey: String = getSecretPayload("aws-secret-access-key")
+    secretClient.close()
+
+    // ---------------------------------------------------------------------------
+    // Build the AWS S3 data source.  The bucket name comes from the config and
+    // the optional path is used to scope the transfer to a prefix.  If the
+    // prefix is empty then the entire bucket will be copied.  Note that the
+    // AWS access key and secret are injected here.
+    // ---------------------------------------------------------------------------
+    val awsAccessKey: AwsAccessKey = AwsAccessKey.newBuilder()
+      .setAccessKeyId(awsAccessKeyId)
+      .setSecretAccessKey(awsSecretAccessKey)
+      .build()
+    val awsSource: AwsS3Data = AwsS3Data.newBuilder()
+      .setBucketName(tableCfg.source.s3Bucket)
+      // Set an empty path when no prefix is provided
+      .setPath(if (tableCfg.source.prefix != null && tableCfg.source.prefix.nonEmpty) tableCfg.source.prefix else "")
+      .setAwsAccessKey(awsAccessKey)
+      .build()
+
+    // ---------------------------------------------------------------------------
+    // Build the GCS data sink.  The bucket name and prefix come from the config.
+    // When specifying a path (prefix) here, STS will write objects into that
+    // prefix, preserving any subdirectories from the source.  Omitting the path
+    // writes to the root of the bucket.
+    // ---------------------------------------------------------------------------
+    val gcsSink: GcsData = GcsData.newBuilder()
+      .setBucketName(cfg.gcsBucket)
+      .setPath(tableCfg.destination.gcsPrefix)
+      .build()
+
+    // ---------------------------------------------------------------------------
+    // Configure which objects to include.  STS filters on prefixes rather than
+    // suffixes.  Here we include a single prefix (the same as the path on the
+    // AWS source) so that reruns copy only the relevant sub-tree.  If you need
+    // to include multiple prefixes, call addIncludePrefixes for each.
+    // ---------------------------------------------------------------------------
+    val objectConditions: ObjectConditions = ObjectConditions.newBuilder()
+      .addIncludePrefixes(tableCfg.source.prefix)
+      .build()
+
+    // ---------------------------------------------------------------------------
+    // Transfer options control behaviour when files already exist at the sink.
+    // Setting overwriteWhenDifferent to true makes the job idempotent: on a
+    // rerun, STS will replace objects that have changed and skip unchanged ones.
+    // Delete options are disabled here because we do not want to remove any
+    // objects after the transfer completes.
+    // ---------------------------------------------------------------------------
+    val transferOptions: TransferOptions = TransferOptions.newBuilder()
+      .setOverwriteWhenDifferent(true)
+      .setDeleteObjectsFromSourceAfterTransfer(false)
+      .setDeleteObjectsUniqueInSink(false)
+      .build()
+
+    // ---------------------------------------------------------------------------
+    // Assemble the transfer specification with the S3 source, the GCS sink,
+    // object conditions and transfer options.
+    // ---------------------------------------------------------------------------
+    val transferSpec: TransferSpec = TransferSpec.newBuilder()
+      .setAwsS3DataSource(awsSource)
+      .setGcsDataSink(gcsSink)
+      .setObjectConditions(objectConditions)
+      .setTransferOptions(transferOptions)
+      .build()
+
+    // ---------------------------------------------------------------------------
+    // Define a schedule that starts immediately and ends on the same day.  STS
+    // requires a start date/time and an end date even for one-off jobs.  The
+    // LocalDate and LocalTime classes are used to obtain the current UTC date
+    // and time, which are converted to the protobuf Date and TimeOfDay types.
+    // ---------------------------------------------------------------------------
+    val now = java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC)
+    val startDate: ProtoDate = ProtoDate.newBuilder()
+      .setYear(now.getYear)
+      .setMonth(now.getMonthValue)
+      .setDay(now.getDayOfMonth)
+      .build()
+    val timeOfDay: TimeOfDay = TimeOfDay.newBuilder()
+      .setHours(now.getHour)
+      .setMinutes(now.getMinute)
+      .setSeconds(now.getSecond)
+      .build()
+    val schedule: Schedule = Schedule.newBuilder()
+      .setScheduleStartDate(startDate)
+      .setScheduleEndDate(startDate)
+      .setStartTimeOfDay(timeOfDay)
+      .build()
+
+    // ---------------------------------------------------------------------------
+    // Build the TransferJob.  The name is left unset so that the server
+    // automatically generates it.  We set the status to ENABLED so that the job
+    // runs as soon as it's created.  The description can be any helpful text.
+    // ---------------------------------------------------------------------------
+    val transferJob: ProtoTransferJob = ProtoTransferJob.newBuilder()
+      .setProjectId(cfg.projectId)
+      .setDescription(s"Initial data migration for table ${tableCfg.name}")
+      .setTransferSpec(transferSpec)
+      .setSchedule(schedule)
+      .setStatus(ProtoTransferJob.Status.ENABLED)
+      .build()
+
+    // Create the request and submit it.  The StorageTransferServiceClient is a
+    // lightweight wrapper around the underlying gRPC client.  Once the job is
+    // created, its name will be returned.  STS jobs are asynchronous: the
+    // create call returns immediately, while the job executes in the background.
+    val request: CreateTransferJobRequest =
+      CreateTransferJobRequest.newBuilder().setTransferJob(transferJob).build()
+    val response: TransferJob = stsClient.createTransferJob(request)
+    println(s"Created STS transfer job ${response.getName} for table ${tableCfg.name}")
+
+    // ---------------------------------------------------------------------------
+    // Optional: poll until the transfer job completes.  For a one-off job, you
+    // can wait for the operation associated with the first run to finish.  In
+    // more advanced pipelines you might track job status via Cloud Logging.
+    // ---------------------------------------------------------------------------
+    // Note: Storage Transfer Service API exposes long-running operations for each
+    // transfer run.  The transfer job name ends with "jobs/NNN".  To get the
+    // operation, use TransferJobServiceClient.runTransferJob or check the
+    // operations API.  Polling is omitted here for brevity.
   }
 
   /**
