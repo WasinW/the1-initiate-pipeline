@@ -1,109 +1,123 @@
-# the1‑initiate‑pipeline
+# The1 Initiate Pipeline – Extended
 
-This repository contains a skeleton implementation of a **data‑initiation pipeline**
-for migrating tables from an AWS EMR/S3/Redshift environment into Google Cloud
-services.  It is based on the design discussed in our chat and is intended as a
-starting point for your own implementation.  The goal of the pipeline is to
-support one‑off initial loads as well as idempotent re‑runs/backfills
-for individual partitions or time ranges.
+This repository provides an **end‑to‑end framework** for performing one‑off or backfilled
+data migrations from an AWS data lake into Google Cloud.  It builds upon
+the original skeleton pipeline and incorporates infrastructure provisioning
+via Terraform, a modular table‑initialisation layer, a configurable Spark
+pipeline and per‑table configuration files.  The goal is to enable
+**idempotent**, repeatable and maintainable data migrations using best
+practices and modern coding patterns.
 
-The pipeline is written in **Scala** and is designed to run on
-**Dataproc Serverless for Spark** or a regular Dataproc cluster.  It uses
-Google Cloud's **Storage Transfer Service (STS)** to copy data from S3 to
-Google Cloud Storage, then creates BigLake external tables, loads data into
-managed BigQuery tables, and finally performs row‑count and value validation
-against the source.  Configuration is driven by a YAML file so that new
-tables can be added without code changes.
+## Repository layout
 
-## Design overview
+The codebase is organised into four major sections:
 
-The pipeline performs the following steps for each table defined in your
-configuration file:
+| Path | Purpose |
+|-----|---------|
+| `terraform/project` | Provision all core infrastructure for the project.  This includes GCS buckets, BigQuery datasets, BigLake connections, Dataplex lakes/zones/assets, Cloud Spanner catalog and IAM bindings. |
+| `terraform/init_table/<table>` | Table‑specific infrastructure.  Each folder contains Terraform or helper scripts that create the managed BigQuery table for the corresponding source table.  This separation allows you to initialise additional tables independently. |
+| `src/main/scala/the1/initiate` | Scala code implementing the main initiation pipeline.  It reads the per‑table configuration, orchestrates the Storage Transfer Service (STS), creates/refreshes external tables, loads into managed tables and performs validation.  You can run it on Dataproc Serverless or locally for testing. |
+| `config/<table>` | Per‑table configuration.  Each folder contains a `job.yaml` describing the source, destination and engine settings, and a `mapping.json` listing the columns to select and any renamings. |
+| `docs` | Additional documentation, including a user manual for deployment and operation. |
 
-1. **Read the schema from AWS**
-   * If `schemaSource` is set to `glue`, the pipeline reads the table
-     definition from AWS Glue/Athena.
-   * If it is set to `infer`, the pipeline samples a few files in S3 and
-     uses Apache Parquet/Arrow to infer the schema.
+The **project‑level Terraform** in `terraform/project` sets up everything
+needed by any table: buckets, datasets, connections, Dataplex, Spanner and
+IAM.  Once applied, you can provision individual managed tables by running
+the Terraform in each `terraform/init_table/<table>` folder.  The pipeline
+assumes these resources exist when it runs.
 
-2. **Create a BigLake external table** pointing at the target GCS prefix.
-   You can optionally enable Hive partition discovery by specifying
-   `hivePartitioning` in the config.
+## Key components
 
-3. **Copy data from S3 to GCS** using the Storage Transfer Service.  The
-   pipeline creates a one‑off STS job for each partition/time range you
-   specify in the job arguments.  STS takes care of parallelism,
-   checksums and retry logic.  We recommend using `overwriteWhenDifferent` on
-   the STS job to make re‑runs idempotent.
+### Infrastructure (Terraform)
 
-4. **Refresh the external table**.  Although BigQuery automatically
-   discovers new objects, you can force a metadata refresh by re‑issuing
-   `CREATE OR REPLACE EXTERNAL TABLE`.
+* **Buckets and datasets** – A regional GCS bucket and two BigQuery datasets
+  (external staging and final/raw) are created.  The bucket uses
+  [uniform bucket‑level access](https://cloud.google.com/storage/docs/uniform-bucket-level-access).
+* **BigLake connection** – A [`CLOUD_RESOURCE` connection](https://cloud.google.com/bigquery/docs/connection-properties)
+  is created so that BigQuery can read and write files in GCS.  The
+  connection’s service account is granted `storage.objectViewer` on the
+  bucket so that external tables can read from it.
+* **Dataplex lake/zone/asset** – A Dataplex lake and raw zone register the
+  GCS bucket as an asset, enabling centralised metadata and governance.
+* **Cloud Spanner catalog** – A Spanner instance and database store the
+  Iceberg catalog used by BigLake managed tables.  BigQuery’s service
+  agent and the custom service account are granted the
+  `roles/spanner.databaseUser` role, which includes the
+  `spanner.sessions.create` permission.
+* **Managed table creation** – A `null_resource` runs a `bq` command
+  with `CREATE TABLE … WITH CONNECTION … OPTIONS(file_format='PARQUET',
+  table_format='ICEBERG', storage_uri='gs://…')` to create a BigLake
+  managed Iceberg table.
 
-5. **Load into the managed table**.  Use a `MERGE` or `INSERT` query to
-   load data into your final dataset.  You can specify a list of column
-   expressions in the config to select or cast columns.
+The project‑level Terraform is idempotent; it uses
+`prevent_destroy = true` on critical resources and `CREATE IF NOT EXISTS`
+statements so that you can safely re‑apply without accidental deletions.
+If a resource already exists, import it into Terraform state before
+applying.
 
-6. **Validate**.  The pipeline computes simple statistics (row counts,
-   checksums, min/max) from both the BigLake external table and the source
-   system (Athena/Redshift) and reports any mismatches.
+### Table‑specific initialisation
 
-Everything is orchestrated from a single Spark driver written in Scala.
-We do not actually use Spark's distributed processing for the copy
-operation itself; STS handles that.  Spark is simply a convenient
-environment for running Scala code on Dataproc Serverless.
+Each folder under `terraform/init_table` contains a single file that
+executes a BigQuery DDL to create a managed table with the correct
+schema for that table.  For example, `terraform/init_table/member_address`
+creates the `member_address` table in the final dataset with the exact
+column names and types you provide.
 
-## Files in this repository
+### Pipeline
 
-* `init_job.yaml` – Example configuration file.  You can define multiple
-  tables here, each with its source and destination settings.  This file
-  drives the entire pipeline.
-* `build.sbt` – SBT build definition listing dependencies for BigQuery,
-  Storage Transfer Service, AWS Glue/Athena clients and logging.
-* `src/main/scala/the1/initiate/Main.scala` – Entry point for the pipeline.
-  It loads the YAML config, loops through tables, orchestrates STS jobs
-  and executes BigQuery DDL/DML statements.  Function bodies are
-  intentionally left as stubs for you to implement according to your
-  environment and requirements.
+The core pipeline is implemented in Scala in `src/main/scala/the1/initiate`.
+It reads a YAML configuration describing your tables, copies data from S3
+to GCS via STS, refreshes external tables, loads data into managed
+tables and performs validation.  You should extend the stubbed methods
+(`readSourceSchema`, `createOrRefreshExternalTable`, `runStsCopy`,
+`loadIntoFinalTable` and `validateSourceAndTarget`) to integrate with
+Glue/Athena, BigQuery and your validation logic.
 
-## How to use
+### Configuration
 
-1. **Configure secrets**.  The pipeline assumes that AWS credentials (for
-   S3 and Glue/Athena) are stored in Google Secret Manager.  The name of the
-   secrets must be provided when instantiating the STS job.  Likewise,
-   the pipeline uses Application Default Credentials to authenticate with
-   Google Cloud services.
+For each table you migrate, create a folder under `config/` with two
+files:
 
-2. **Edit `init_job.yaml`**.  Define the tables you want to migrate,
-   including their S3 prefixes, target GCS prefixes, BigQuery dataset/table
-   names and column mappings.  You can also specify per‑table engine
-   overrides if you need to fall back to Dataflow or Dataproc for special
-   cases (e.g. files > 5 TiB).
+1. **`job.yaml`** – Describes the source location in S3, the destination
+   GCS prefix, the BigQuery datasets/tables, and engine/validation options.
+2. **`mapping.json`** – Contains two sections: `selectedColumns` lists
+   the columns to select from the source, and `columnMapping` defines
+   renamings or casting expressions for loading into the final table.  The
+   pipeline will read this file and build the `columnMapping` section of
+   the YAML at run time.
 
-3. **Build the project**.  Use SBT to download dependencies and build a
-   JAR:
+## Usage
 
-   ```bash
-   sbt assembly
-   ```
+1. **Deploy infrastructure**
+   1. Install Terraform and authenticate to your GCP project.
+   2. Navigate to `terraform/project` and run:
+      ```bash
+      terraform init
+      terraform apply -var="project_id=YOUR_PROJECT_ID" -var="region=YOUR_REGION"
+      ```
+   3. Repeat for each table‑specific folder under `terraform/init_table` to
+      create the managed table:
+      ```bash
+      cd terraform/init_table/member_address
+      terraform init
+      terraform apply -var="project_id=YOUR_PROJECT_ID" -var="region=YOUR_REGION"         -var="dataset_raw=demo_the1_raw" -var="bucket_name=demo-central-the1"
+      ```
 
-4. **Submit to Dataproc Serverless**.  Use the `gcloud` CLI to run the
-   pipeline on Dataproc Serverless:
+2. **Prepare your config and mapping**
+   1. Copy `config/member_address/job.yaml` and edit `projectId`,
+      `datasetExternal`, `datasetFinal`, `gcsBucket`, `s3Bucket` and other
+      fields to match your environment.
+   2. Edit `config/member_address/mapping.json` to list the columns you
+      require and specify any renamings or casts.
+   3. When you run the pipeline, the code will merge these definitions
+      into the YAML configuration at runtime.
 
-   ```bash
-   gcloud dataproc batches submit --project=YOUR_PROJECT --region=YOUR_REGION \
-     --subnet=YOUR_VPC_SUBNET --service-account=YOUR_SA \
-     --jars=gs://path/to/built.jar --class=the1.initiate.Main \
-     --args=gs://path/to/init_job.yaml
-   ```
+3. **Build and run the pipeline**
+   1. Install SBT.
+   2. Run `sbt assembly` to build a fat JAR.
+   3. Submit the job to Dataproc Serverless:
+      ```bash
+      gcloud dataproc batches submit         --project=YOUR_PROJECT_ID --region=YOUR_REGION         --subnet=YOUR_SUBNET --service-account=sa-demo-the1@YOUR_PROJECT_ID.iam.gserviceaccount.com         --jars=gs://your-bucket/path/to/the1-initiate-pipeline-assembly.jar         --class=the1.initiate.Main         --args=gs://your-bucket/path/to/config/member_address/job.yaml
+      ```
 
-   Alternatively, you can run the JAR locally for testing:
-
-   ```bash
-   sbt run
-   ```
-
-This scaffold is provided as a starting point.  You will need to
-implement the functions in `Main.scala` to suit your environment,
-including proper error handling, partitioned backfill logic and detailed
-validation.  Feel free to extend or reorganise the code as needed.
+Refer to `docs/user_manual.md` for a more detailed step‑by‑step guide.

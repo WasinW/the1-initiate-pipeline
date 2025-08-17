@@ -7,14 +7,13 @@ import com.fasterxml.jackson.dataformat.yaml.YAMLFactory
 
 // Google Cloud clients
 import com.google.cloud.bigquery.{BigQuery, BigQueryOptions, TableId}
-import com.google.cloud.storage.transfer.v1.{StorageTransferServiceClient, TransferJob}
+import com.google.cloud.storage.transfer.v1.{StorageTransferServiceClient}
 // Additional imports for STS transfer job definition
 import com.google.cloud.secretmanager.v1.{SecretManagerServiceClient, SecretVersionName}
-import com.google.storagetransfer.v1.proto.TransferProto
-import com.google.storagetransfer.v1.proto.TransferProto.CreateTransferJobRequest
-import com.google.storagetransfer.v1.proto.TransferTypes
-import com.google.storagetransfer.v1.proto.TransferTypes.{TransferOptions, ObjectConditions, TransferSpec, Schedule}
-import com.google.storagetransfer.v1.proto.TransferTypes.{AwsS3Data, AwsAccessKey, GcsData, TransferJob => ProtoTransferJob}
+import com.google.storagetransfer.v1.proto.TransferTypes.{AwsAccessKey}
+// Additional STS classes used in runStsCopy
+import com.google.storagetransfer.v1.proto.TransferTypes.{AwsS3Data, GcsData, ObjectConditions, TransferOptions}
+import com.google.storagetransfer.v1.proto.{TransferSpec, Schedule, TransferJob, TransferJob => ProtoTransferJob, CreateTransferJobRequest}
 import com.google.type.{Date => ProtoDate, TimeOfDay}
 
 /**
@@ -31,9 +30,9 @@ import com.google.type.{Date => ProtoDate, TimeOfDay}
 object Main {
 
   /**
-   * Configuration model representing the YAML file.  Only a subset of
-   * fields is defined here; feel free to extend with additional options.
-   */
+    * Configuration model representing the YAML file.  Only a subset of
+    * fields is defined here; feel free to extend with additional options.
+    */
   case class Config(
     projectId: String,
     datasetExternal: String,
@@ -73,7 +72,7 @@ object Main {
 
   def main(args: Array[String]): Unit = {
     if (args.length < 1) {
-      System.err.println("Usage: Main <config-yaml-path>")
+      System.err.println("Usage: Main <path_to_job.yaml>")
       System.exit(1)
     }
     val configPath = args(0)
@@ -103,10 +102,10 @@ object Main {
   }
 
   /**
-   * Parse YAML configuration file into our Config case class.  Uses Jackson
-   * YAML module.  Unknown properties in the YAML are ignored so you can
-   * extend the file without updating the code.
-   */
+    * Parse YAML configuration file into our Config case class.  Uses Jackson
+    * YAML module.  Unknown properties in the YAML are ignored so you can
+    * extend the file without updating the code.
+    */
   def loadConfig(path: String): Config = {
     val mapper = new ObjectMapper(new YAMLFactory())
     mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
@@ -115,10 +114,10 @@ object Main {
   }
 
   /**
-   * Read the source schema either from AWS Glue/Athena or by inferring it
-   * from sample Parquet files on S3.  This implementation is a placeholder;
-   * you'll need to add AWS SDK calls and schema conversion logic.
-   */
+    * Read the source schema either from AWS Glue/Athena or by inferring it
+    * from sample Parquet files on S3.  This implementation is a placeholder;
+    * you'll need to add AWS SDK calls and schema conversion logic.
+    */
   def readSourceSchema(tableCfg: TableConfig): String = {
     tableCfg.source.schemaSource.toLowerCase match {
       case "glue" =>
@@ -135,11 +134,11 @@ object Main {
   }
 
   /**
-   * Create or refresh a BigLake external table pointing at the destination GCS
-   * prefix.  The schema should be converted to a BigQuery Schema if
-   * necessary.  Here we simply print out a DDL; in your production code,
-   * invoke the BigQuery client and run the DDL.
-   */
+    * Create or refresh a BigLake external table pointing at the destination GCS
+    * prefix.  The schema should be converted to a BigQuery Schema if
+    * necessary.  Here we simply print out a DDL; in your production code,
+    * invoke the BigQuery client and run the DDL.
+    */
   def createOrRefreshExternalTable(bigQuery: BigQuery, cfg: Config, tableCfg: TableConfig, schema: String): Unit = {
     val extTableId = TableId.of(cfg.datasetExternal, s"${tableCfg.name}_ext")
     val gcsUri = s"gs://${cfg.gcsBucket}/${tableCfg.destination.gcsPrefix}*"
@@ -160,13 +159,14 @@ object Main {
   }
 
   /**
-   * Trigger a Storage Transfer Service job to copy objects from S3 to GCS.
-   * You should build a TransferJob definition, specifying the source S3
-   * bucket, credentials stored in Secret Manager, and the destination GCS
-   * bucket/prefix.  Use overwriteWhenDifferent to make it idempotent.
-   */
+    * Trigger a Storage Transfer Service job to copy objects from S3 to GCS.
+    * You should build a TransferJob definition, specifying the source S3
+    * bucket, credentials stored in Secret Manager, and the destination GCS
+    * bucket/prefix.  Use overwriteWhenDifferent to make it idempotent.
+    */
   def runStsCopy(cfg: Config, tableCfg: TableConfig, stsClient: StorageTransferServiceClient): Unit = {
-    println(s"Starting STS copy for ${tableCfg.name} from s3://${tableCfg.source.s3Bucket}/${tableCfg.source.prefix} to gs://${cfg.gcsBucket}/${tableCfg.destination.gcsPrefix} …")
+    println(s"Starting STS copy for ${tableCfg.name} from s3://${tableCfg.source.s3Bucket}/${tableCfg.source.prefix} to \n" +
+      s"gs://${cfg.gcsBucket}/${tableCfg.destination.gcsPrefix} …")
 
     // ---------------------------------------------------------------------------
     // Retrieve AWS credentials from Secret Manager.  This implementation assumes
@@ -199,7 +199,11 @@ object Main {
     val awsSource: AwsS3Data = AwsS3Data.newBuilder()
       .setBucketName(tableCfg.source.s3Bucket)
       // Set an empty path when no prefix is provided
-      .setPath(if (tableCfg.source.prefix != null && tableCfg.source.prefix.nonEmpty) tableCfg.source.prefix else "")
+      .setPath(
+        if (tableCfg.source.prefix != null && tableCfg.source.prefix.nonEmpty)
+          tableCfg.source.prefix
+        else ""
+      )
       .setAwsAccessKey(awsAccessKey)
       .build()
 
@@ -302,33 +306,39 @@ object Main {
     // transfer run.  The transfer job name ends with "jobs/NNN".  To get the
     // operation, use TransferJobServiceClient.runTransferJob or check the
     // operations API.  Polling is omitted here for brevity.
+
+    // TODO: Build and run TransferJob; see Google Cloud Storage Transfer Service examples
+    println(s"Would construct TransferJob here using $awsAccessKey and run via stsClient …")
   }
 
   /**
-   * Load data from the external table into the final managed BigQuery table.
-   * This typically involves a MERGE or INSERT statement.  Use the
-   * columnMapping defined in the config to select/cast columns.  For
-   * idempotent re‑runs, MERGE on the business key and partition.
-   */
+    * Load data from the external table into the final managed table.  Use
+    * INSERT, MERGE or LOAD DATA statements depending on your needs.  At this
+    * stage you can apply the columnMapping defined in your job YAML or in
+    * mapping.json.  Here we simply print a pseudo‑DML.
+    */
   def loadIntoFinalTable(bigQuery: BigQuery, cfg: Config, tableCfg: TableConfig): Unit = {
-    val extTableId = TableId.of(cfg.datasetExternal, s"${tableCfg.name}_ext")
-    val finalTableId = TableId.of(tableCfg.destination.finalTable.dataset, tableCfg.destination.finalTable.table)
-    val selectExprs = tableCfg.destination.columnMapping.map(cm => s"${cm.expr} AS ${cm.as}").mkString(", ")
-    val sql = s"INSERT INTO `${finalTableId.getDataset}.${finalTableId.getTable}` ($selectExprs) SELECT $selectExprs FROM `${extTableId.getDataset}.${extTableId.getTable}`"
-    println(s"Executing load into final table ${finalTableId.getTable}:\n$sql")
-    // TODO: use bigQuery.query() to run the INSERT or MERGE
+    val extTableName = s"${cfg.datasetExternal}.${tableCfg.name}_ext"
+    val finalTableName = s"${cfg.datasetFinal}.${tableCfg.name}"
+    val columnExprs = if (tableCfg.destination.columnMapping.isEmpty) "*" else tableCfg.destination.columnMapping.map(cm => s"${cm.expr} AS ${cm.as}").mkString(",")
+    val dml =
+      s"""
+         |INSERT INTO `${finalTableName}`
+         |SELECT ${columnExprs}
+         |FROM `${extTableName}`
+         |""".stripMargin
+    println(s"Executing load into final table:\n$dml")
+    // TODO: bigQuery.query(QueryJobConfiguration.newBuilder(dml).build())
   }
 
   /**
-   * Compare counts and optionally checksums between the source system and the
-   * BigQuery external/final tables.  This implementation simply prints a
-   * placeholder; replace with calls to Athena/Redshift and BigQuery to
-   * compute statistics.
-   */
+    * Validate that the row counts and basic statistics match between the
+    * external table and the source system.  You could extend this to run
+    * checksums on selected columns【451817110495529†L329-L349】.  This stub prints a message.
+    */
   def validateSourceAndTarget(cfg: Config, tableCfg: TableConfig): Unit = {
-    println(s"Validating ${tableCfg.name} …")
-    // TODO: query Athena or Redshift for row counts and checksumColumns
-    // TODO: query BigQuery for row counts and checksumColumns
-    // Compare and report mismatches
+    println(s"Validating ${tableCfg.name} … (stub)")
+    // TODO: query BigQuery and source system, compare counts and checksums
   }
+
 }

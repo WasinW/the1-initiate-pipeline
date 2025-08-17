@@ -1,0 +1,41 @@
+projectId: ntt-test-data-bq-looker
+datasetExternal: demo_the1_staging
+datasetFinal: demo_the1_raw
+gcsBucket: demo-central-the1
+
+# When set to `auto`, the pipeline chooses the Storage Transfer Service by default
+# and falls back to Dataflow or Dataproc based on your thresholds.  You can
+# override per table.  Valid values: auto | sts | dataflow | dataproc
+defaultEngine: auto
+
+tables:
+  - name: member_address
+    source:
+      s3Bucket: demo-t1-analytics
+      prefix: refined/sbl/member_address/
+      format: parquet
+      schemaSource: infer
+    destination:
+      gcsPrefix: data-zone/staging/member_address/
+      biglake:
+        hivePartitioning: false
+        hivePartitionUriPrefix: gs://demo-central-the1/data-zone/staging/member_address/
+      finalTable:
+        dataset: demo_the1_raw
+        table: member_address
+      # Column mapping is loaded from mapping.json at runtime
+      columnMapping: []
+    engineOverrides:
+      preferred: sts
+      fallbacks:
+        - dataflow
+        - dataproc
+    thresholds:
+      maxSingleObjectTiB: 5
+      minCompactTargetMB: 256
+
+validation:
+  compareWith: s3
+  checksumColumns:
+    - "MEMBER_ID"
+  sampleRatio: 0.0
