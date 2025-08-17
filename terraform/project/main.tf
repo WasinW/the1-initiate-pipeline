@@ -10,14 +10,26 @@
 // - IAM bindings for Spanner
 // - A template managed table creation (null_resource) for demonstration
 
+# terraform {
+#   required_version = ">= 1.3"
+#   required_providers {
+#     google = {
+#       source  = "hashicorp/google"
+#       version = ">= 4.60"
+#     }
+#   }
+# }
 terraform {
-  required_version = ">= 1.3"
   required_providers {
     google = {
       source  = "hashicorp/google"
-      version = ">= 4.60"
+      version = "~> 5.28" # หรือใหม่กว่านี้ที่ทีมคุณใช้ได้
     }
   }
+}
+provider "google" {
+  project = var.project_id
+  region  = var.region
 }
 
 variable "project_id" { type = string }
@@ -42,37 +54,37 @@ provider "google" {
 
 // Enable required APIs
 resource "google_project_service" "bigquery" {
-  project = var.project_id
-  service = "bigquery.googleapis.com"
+  project            = var.project_id
+  service            = "bigquery.googleapis.com"
   disable_on_destroy = false
 }
 resource "google_project_service" "bigquery_connection" {
-  project = var.project_id
-  service = "bigqueryconnection.googleapis.com"
+  project            = var.project_id
+  service            = "bigqueryconnection.googleapis.com"
   disable_on_destroy = false
 }
 resource "google_project_service" "dataplex" {
-  project = var.project_id
-  service = "dataplex.googleapis.com"
+  project            = var.project_id
+  service            = "dataplex.googleapis.com"
   disable_on_destroy = false
 }
 resource "google_project_service" "spanner" {
-  project = var.project_id
-  service = "spanner.googleapis.com"
+  project            = var.project_id
+  service            = "spanner.googleapis.com"
   disable_on_destroy = false
 }
 resource "google_project_service" "storage" {
-  project = var.project_id
-  service = "storage.googleapis.com"
+  project            = var.project_id
+  service            = "storage.googleapis.com"
   disable_on_destroy = false
 }
 
 // Bucket to hold staging and managed data
 resource "google_storage_bucket" "bucket" {
-  name     = var.bucket_name
-  location = var.region
+  name                        = var.bucket_name
+  location                    = var.region
   uniform_bucket_level_access = true
-  force_destroy = false
+  force_destroy               = false
   lifecycle_rule {
     action { type = "Delete" }
     condition { age = 365 }
@@ -111,30 +123,31 @@ resource "google_project_iam_member" "sa_connection_admin" {
 
 // Datasets
 resource "google_bigquery_dataset" "staging" {
-  dataset_id = var.dataset_staging
-  project    = var.project_id
-  location   = var.region
+  dataset_id  = var.dataset_staging
+  project     = var.project_id
+  location    = var.region
   description = "External staging dataset"
   lifecycle { prevent_destroy = true }
 }
 resource "google_bigquery_dataset" "raw" {
-  dataset_id = var.dataset_raw
-  project    = var.project_id
-  location   = var.region
+  dataset_id  = var.dataset_raw
+  project     = var.project_id
+  location    = var.region
   description = "Managed raw dataset"
   lifecycle { prevent_destroy = true }
 }
 
 // BigQuery connection
 resource "google_bigquery_connection" "connection" {
-  connection_id  = var.connection_id
-  project        = var.project_id
-  location       = var.region
-  connection_type = "CLOUD_RESOURCE"
-  friendly_name  = "GCS connection"
-  description    = "Connection used by BigQuery to access GCS"
+  project       = var.project_id
+  location      = var.region        # เช่น asia-southeast1
+  connection_id = var.connection_id # เช่น "demo_gcs_iceberg_connection"
+  friendly_name = "GCS connection"
+  description   = "Connection used by BigQuery to access GCS"
+
   cloud_resource {}
 }
+
 
 // Grant the connection service account read access on the bucket
 resource "google_storage_bucket_iam_member" "connection_bucket_viewer" {
@@ -145,46 +158,77 @@ resource "google_storage_bucket_iam_member" "connection_bucket_viewer" {
 
 // Dataplex lake, zone and asset
 resource "google_dataplex_lake" "lake" {
-  lake_id      = var.lake_id
-  project      = var.project_id
-  location     = var.region
+  project  = var.project_id
+  location = var.region
+  # The `name` attribute specifies the lake identifier.  The field `lake_id`
+  # isn't valid in newer provider versions.
+  name         = var.lake_id # เช่น "demo-lake"
   display_name = "Demo Lake"
   description  = "Dataplex lake for raw data"
 }
+
+# Dataplex zone
 resource "google_dataplex_zone" "zone" {
-  project      = var.project_id
-  lake         = google_dataplex_lake.lake.name
-  location     = var.region
-  zone_id      = var.zone_id
+  project  = var.project_id
+  lake     = google_dataplex_lake.lake.name # Use the lake's name reference
+  location = var.region
+  # The zone identifier; `name` is required instead of `zone_id` in newer
+  # provider versions.
+  name         = var.zone_id # เช่น "raw"
   type         = "RAW"
   display_name = "Raw Zone"
   description  = "Raw data zone for staging files"
-  resource_spec { location_type = "SINGLE_REGION" }
-  discovery_spec { enabled = true include_patterns = ["**"] exclude_patterns = [] }
+
+  resource_spec {
+    location_type = "SINGLE_REGION"
+  }
+
+  discovery_spec {
+    enabled          = true
+    include_patterns = ["**"]
+    exclude_patterns = []
+  }
+
   depends_on = [google_dataplex_lake.lake]
 }
+
+# Dataplex asset ชี้ไปที่ GCS bucket (ทั้ง bucket; จะกำหนด include/exclude ผ่าน discovery)
 resource "google_dataplex_asset" "asset" {
-  project      = var.project_id
-  lake         = google_dataplex_lake.lake.name
-  zone         = google_dataplex_zone.zone.name
-  location     = var.region
-  asset_id     = var.asset_id
+  project = var.project_id
+  lake    = google_dataplex_lake.lake.name
+  # In recent provider versions the argument is `dataplex_zone`, not `zone`.
+  dataplex_zone = google_dataplex_zone.zone.name
+  location      = var.region
+  # Provide the asset identifier via `name`.  `asset_id` is no longer valid.
+  name         = var.asset_id # เช่น "staging_asset"
   display_name = "Staging asset"
   description  = "Asset pointing at staging bucket"
-  discovery_spec { enabled = true }
+
+  discovery_spec {
+    enabled = true
+    # To restrict discovery to a path prefix, set include_patterns, e.g.:
+    # include_patterns = ["data-zone/staging/**"]
+  }
+
   resource_spec {
-    name = "projects/_/buckets/${google_storage_bucket.bucket.name}"
+    # Point to the bucket created above.  Dataplex expects the full
+    # resource name in the form projects/_/buckets/<bucket-name>.
+    # Provide the full resource name for the bucket using the current project
+    # number.  Using an underscore '_' is also accepted, but specifying the
+    # project explicitly is clearer.
+    name = "projects/${data.google_project.current.number}/buckets/${google_storage_bucket.bucket.name}"
     type = "STORAGE_BUCKET"
   }
+
   depends_on = [google_dataplex_zone.zone]
 }
 
 // Cloud Spanner instance and database
 resource "google_spanner_instance" "instance" {
-  name          = var.spanner_instance
-  project       = var.project_id
-  config        = "regional-${var.region}"
-  display_name  = "BigQuery Iceberg Catalog"
+  name             = var.spanner_instance
+  project          = var.project_id
+  config           = "regional-${var.region}"
+  display_name     = "BigQuery Iceberg Catalog"
   processing_units = 100
 }
 resource "google_spanner_database" "database" {
