@@ -1,0 +1,128 @@
+# The1 Initiate Pipeline - Makefile
+
+# Configuration
+PROJECT_ID := ntt-test-data-bq-looker
+REGION := asia-southeast1
+BUCKET := demo-central-the1
+SERVICE_ACCOUNT := sa-demo-the1@$(PROJECT_ID).iam.gserviceaccount.com
+VERSION := 1.0.0
+
+# Colors
+RED := \033[0;31m
+GREEN := \033[0;32m
+YELLOW := \033[1;33m
+NC := \033[0m
+
+.PHONY: help build deploy run clean test validate setup
+
+help: ## Show this help message
+	@echo "$(GREEN)The1 Initiate Pipeline - Available Commands$(NC)"
+	@echo ""
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(YELLOW)%-15s$(NC) %s\n", $$1, $$2}'
+	@echo ""
+
+setup: ## Initial setup - create directories
+	@echo "$(YELLOW)Setting up project structure...$(NC)"
+	@mkdir -p src/main/scala/the1/initiate/services
+	@mkdir -p src/main/scala/the1/initiate/logging
+	@mkdir -p src/test/scala/the1/initiate
+	@mkdir -p project
+	@echo "$(GREEN)Setup complete!$(NC)"
+
+build: ## Build the JAR file
+	@echo "$(YELLOW)Building JAR...$(NC)"
+	@sbt clean assembly
+	@echo "$(GREEN)Build complete!$(NC)"
+
+test: ## Run tests
+	@echo "$(YELLOW)Running tests...$(NC)"
+	@sbt test
+	@echo "$(GREEN)Tests complete!$(NC)"
+
+deploy: build ## Build and deploy to GCS
+	@echo "$(YELLOW)Deploying to GCS...$(NC)"
+	@gsutil cp target/scala-2.12/the1-initiate-pipeline-$(VERSION).jar gs://$(BUCKET)/jars/
+	@gsutil -m rsync -r config/ gs://$(BUCKET)/config/
+	@echo "$(GREEN)Deploy complete!$(NC)"
+
+run: ## Run pipeline for member_address table
+	@./run_pipeline.sh member_address
+
+run-table: ## Run pipeline for specific table (usage: make run-table TABLE=member_address)
+	@if [ -z "$(TABLE)" ]; then \
+		echo "$(RED)Error: TABLE not specified$(NC)"; \
+		echo "Usage: make run-table TABLE=table_name"; \
+		exit 1; \
+	fi
+	@./run_pipeline.sh $(TABLE)
+
+validate: ## Validate data in BigQuery
+	@echo "$(YELLOW)Validating data...$(NC)"
+	@bq query --use_legacy_sql=false --format=pretty \
+		"SELECT \
+		  'external' as table_type, COUNT(*) as row_count \
+		FROM demo_the1_staging.member_address_ext \
+		UNION ALL \
+		SELECT \
+		  'managed' as table_type, COUNT(*) as row_count \
+		FROM demo_the1_raw.member_address"
+
+logs: ## View recent logs from GCS
+	@echo "$(YELLOW)Recent logs:$(NC)"
+	@gsutil ls -l "gs://$(BUCKET)/data-platform/logs/$$(date +%Y/%m/%d)/" | tail -5
+	@echo ""
+	@echo "$(YELLOW)To view a specific log:$(NC)"
+	@echo "gsutil cat gs://$(BUCKET)/data-platform/logs/YYYY/MM/DD/filename.log"
+
+clean: ## Clean build artifacts
+	@echo "$(YELLOW)Cleaning...$(NC)"
+	@sbt clean
+	@rm -rf target/
+	@rm -rf project/target/
+	@rm -rf project/project/
+	@echo "$(GREEN)Clean complete!$(NC)"
+
+check-deps: ## Check if all dependencies are installed
+	@echo "$(YELLOW)Checking dependencies...$(NC)"
+	@command -v sbt >/dev/null 2>&1 || { echo "$(RED)✗ SBT not installed$(NC)"; exit 1; }
+	@echo "$(GREEN)✓ SBT installed$(NC)"
+	@command -v gcloud >/dev/null 2>&1 || { echo "$(RED)✗ gcloud not installed$(NC)"; exit 1; }
+	@echo "$(GREEN)✓ gcloud installed$(NC)"
+	@command -v gsutil >/dev/null 2>&1 || { echo "$(RED)✗ gsutil not installed$(NC)"; exit 1; }
+	@echo "$(GREEN)✓ gsutil installed$(NC)"
+	@command -v bq >/dev/null 2>&1 || { echo "$(RED)✗ bq not installed$(NC)"; exit 1; }
+	@echo "$(GREEN)✓ bq installed$(NC)"
+	@echo "$(GREEN)All dependencies installed!$(NC)"
+
+create-secrets: ## Create AWS secrets in Secret Manager
+	@echo "$(YELLOW)Creating secrets...$(NC)"
+	@read -p "Enter AWS Access Key ID: " aws_key; \
+	echo "$$aws_key" | gcloud secrets create aws-access-key-id --data-file=- --project=$(PROJECT_ID) || echo "Secret already exists"
+	@read -sp "Enter AWS Secret Access Key: " aws_secret; \
+	echo "$$aws_secret" | gcloud secrets create aws-secret-access-key --data-file=- --project=$(PROJECT_ID) || echo "Secret already exists"
+	@echo ""
+	@echo "$(GREEN)Secrets created/updated!$(NC)"
+
+monitor: ## Monitor running Dataproc jobs
+	@echo "$(YELLOW)Active Dataproc batches:$(NC)"
+	@gcloud dataproc batches list --region=$(REGION) --project=$(PROJECT_ID) --filter="state=ACTIVE" --format="table(name,state,createTime)"
+
+status: ## Check pipeline status
+	@echo "$(GREEN)Pipeline Status$(NC)"
+	@echo "================"
+	@echo "Project: $(PROJECT_ID)"
+	@echo "Region: $(REGION)"
+	@echo "Bucket: $(BUCKET)"
+	@echo ""
+	@echo "$(YELLOW)JAR Status:$(NC)"
+	@gsutil ls -l gs://$(BUCKET)/jars/the1-initiate-pipeline-$(VERSION).jar 2>/dev/null || echo "$(RED)JAR not found$(NC)"
+	@echo ""
+	@echo "$(YELLOW)Config Files:$(NC)"
+	@gsutil ls gs://$(BUCKET)/config/ 2>/dev/null || echo "$(RED)No configs found$(NC)"
+	@echo ""
+	@echo "$(YELLOW)Recent Jobs:$(NC)"
+	@gcloud dataproc batches list --region=$(REGION) --project=$(PROJECT_ID) --limit=3 --format="table(name,state,createTime)" 2>/dev/null
+
+quick-start: setup build deploy ## Complete setup, build and deploy
+	@echo "$(GREEN)Pipeline ready to run!$(NC)"
+	@echo "Run: make run TABLE=member_address"
