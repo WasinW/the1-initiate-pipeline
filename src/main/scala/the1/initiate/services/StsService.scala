@@ -1,13 +1,15 @@
 package the1.initiate.services
 
+import com.google.api.gax.longrunning.OperationFuture
 import com.google.cloud.storagetransfer.v1.StorageTransferServiceClient
 import com.google.cloud.secretmanager.v1.{SecretManagerServiceClient, SecretVersionName}
+import com.google.storagetransfer.v1.proto.StorageTransferServiceProto._
 import com.google.storagetransfer.v1.proto.TransferTypes._
-import com.google.storagetransfer.v1.proto._
-import com.google.`type`.{Date => ProtoDate, TimeOfDay}
-import com.google.protobuf.Duration
+import com.google.`type`.{Date => ProtoDate, TimeOfDay => ProtoTimeOfDay}
+import com.google.protobuf.Empty
 import java.time.{OffsetDateTime, ZoneOffset}
 import scala.util.{Try, Success, Failure}
+import scala.concurrent.duration._
 import the1.initiate.logging.GcsLogger
 
 /**
@@ -39,10 +41,12 @@ class StsService(projectId: String, logger: GcsLogger) {
       val awsAccessKey = getSecretValue(awsKeySecretName)
       val awsSecretKey = getSecretValue(awsSecretSecretName)
       
+      logger.info(s"AWS credentials retrieved successfully")
+      
       // 2. Build AWS source
       val awsSource = AwsS3Data.newBuilder()
         .setBucketName(sourceBucket)
-        .setPath(if (sourcePrefix.nonEmpty) sourcePrefix else "")
+        .setPath(if (sourcePrefix.nonEmpty && !sourcePrefix.endsWith("/")) s"$sourcePrefix/" else sourcePrefix)
         .setAwsAccessKey(
           AwsAccessKey.newBuilder()
             .setAccessKeyId(awsAccessKey)
@@ -54,34 +58,24 @@ class StsService(projectId: String, logger: GcsLogger) {
       // 3. Build GCS destination
       val gcsSink = GcsData.newBuilder()
         .setBucketName(destBucket)
-        .setPath(destPrefix)
+        .setPath(if (destPrefix.nonEmpty && !destPrefix.endsWith("/")) s"$destPrefix/" else destPrefix)
         .build()
       
       // 4. Configure transfer options
       val transferOptions = TransferOptions.newBuilder()
-        .setOverwriteObjectsAlreadyExistingInSink(true)  // Idempotent
+        .setOverwriteObjectsAlreadyExistingInSink(true)
         .setDeleteObjectsFromSourceAfterTransfer(false)
         .setDeleteObjectsUniqueInSink(false)
         .build()
       
-      // 5. Object conditions (filter by prefix if needed)
-      val objectConditions = if (sourcePrefix.nonEmpty) {
-        ObjectConditions.newBuilder()
-          .addIncludePrefixes(sourcePrefix)
-          .build()
-      } else {
-        ObjectConditions.newBuilder().build()
-      }
-      
-      // 6. Build transfer spec
+      // 5. Build transfer spec
       val transferSpec = TransferSpec.newBuilder()
         .setAwsS3DataSource(awsSource)
         .setGcsDataSink(gcsSink)
-        .setObjectConditions(objectConditions)
         .setTransferOptions(transferOptions)
         .build()
       
-      // 7. Create one-time schedule (run immediately)
+      // 6. Create one-time schedule (run immediately)
       val now = OffsetDateTime.now(ZoneOffset.UTC)
       val schedule = Schedule.newBuilder()
         .setScheduleStartDate(
@@ -99,15 +93,15 @@ class StsService(projectId: String, logger: GcsLogger) {
             .build()
         )
         .setStartTimeOfDay(
-          TimeOfDay.newBuilder()
-            .setHours(now.getHour)
-            .setMinutes(now.getMinute + 1)  // Start 1 minute from now
+          ProtoTimeOfDay.newBuilder()
+            .setHours(0)
+            .setMinutes(0)
             .setSeconds(0)
             .build()
         )
         .build()
       
-      // 8. Create transfer job
+      // 7. Create transfer job
       val transferJob = TransferJob.newBuilder()
         .setProjectId(projectId)
         .setDescription(s"Data migration: $sourceBucket/$sourcePrefix to $destBucket/$destPrefix")
@@ -116,21 +110,25 @@ class StsService(projectId: String, logger: GcsLogger) {
         .setStatus(TransferJob.Status.ENABLED)
         .build()
       
-      val createdJob = stsClient.createTransferJob(transferJob)
+      val request = CreateTransferJobRequest.newBuilder()
+        .setTransferJob(transferJob)
+        .build()
+      
+      val createdJob = stsClient.createTransferJob(request)
       val jobName = createdJob.getName
       
       logger.info(s"Created STS job: $jobName")
       
-      // 9. Run the job immediately
-      val runRequest = TransferProto.RunTransferJobRequest.newBuilder()
+      // 8. Run the job immediately
+      val runRequest = RunTransferJobRequest.newBuilder()
         .setJobName(jobName)
         .setProjectId(projectId)
         .build()
       
-      val operation = stsClient.runTransferJob(runRequest)
-      logger.info(s"Started transfer operation: ${operation.getName}")
+      val operationFuture = stsClient.runTransferJobAsync(runRequest)
+      logger.info(s"Started transfer operation")
       
-      // 10. Monitor transfer progress
+      // 9. Monitor transfer progress
       monitorTransferJob(jobName)
       
       jobName
@@ -160,41 +158,43 @@ class StsService(projectId: String, logger: GcsLogger) {
       checkCount += 1
       
       try {
-        val job = stsClient.getTransferJob(jobName, projectId)
+        val getRequest = GetTransferJobRequest.newBuilder()
+          .setJobName(jobName)
+          .setProjectId(projectId)
+          .build()
+          
+        val job = stsClient.getTransferJob(getRequest)
         
         // Check latest operation
         val latestOperation = job.getLatestOperationName
         
-        if (latestOperation != null && !latestOperation.isEmpty) {
+        if (!latestOperation.isEmpty) {
           logger.info(s"Latest operation: $latestOperation")
-          
-          // Check if job is done based on status
-          job.getStatus match {
-            case TransferJob.Status.SUCCESS =>
-              isComplete = true
-              logger.info("Transfer completed successfully")
-              
-            case TransferJob.Status.FAILED =>
-              isComplete = true
-              throw new RuntimeException("Transfer job failed")
-              
-            case TransferJob.Status.DISABLED =>
-              isComplete = true
-              logger.warn("Transfer job was disabled")
-              
-            case _ =>
-              logger.info(s"Transfer in progress... (check $checkCount/$maxChecks)")
-          }
         }
+        
+        // Check job status
+        val status = job.getStatus
+        logger.info(s"Job status: $status")
+        
+        if (status == TransferJob.Status.DELETED || 
+            status == TransferJob.Status.DISABLED ||
+            status == TransferJob.Status.UNRECOGNIZED) {
+          isComplete = true
+          logger.info(s"Transfer job completed with status: $status")
+        } else {
+          logger.info(s"Transfer in progress... (check $checkCount/$maxChecks)")
+        }
+        
       } catch {
         case e: Exception =>
           logger.warn(s"Error checking transfer status: ${e.getMessage}")
-          // Continue monitoring unless it's a critical error
+          // Continue monitoring
       }
     }
     
     if (!isComplete) {
       logger.warn(s"Transfer job monitoring timeout after $checkCount checks. Job may still be running.")
+      logger.warn(s"Please check the job status in the GCP Console")
     }
   }
   

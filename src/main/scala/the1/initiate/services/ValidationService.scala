@@ -181,7 +181,7 @@ class ValidationService(
       val result = queryJob.waitFor().getQueryResults()
       
       result.iterateAll().asScala.toSeq.headOption
-        .flatMap(row => Option(row.get("checksum")))
+        .flatMap(row => scala.Option(row.get("checksum")))
         .map(_.getStringValue)
         .getOrElse("")
     }
