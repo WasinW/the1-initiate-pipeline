@@ -1,7 +1,15 @@
 *.env
 **/secrets*.yaml
-..terraform*.terraform/
+.terraform/
+*.terraform/
 *.exe
-./target/*
+target/
 .terraform*
-project/*
+# แก้จาก project/* เป็น specific files
+project/target/
+project/project/
+.bsp/
+.idea/
+*.class
+*.log
+.DS_Store
