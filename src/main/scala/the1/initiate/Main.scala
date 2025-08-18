@@ -10,6 +10,8 @@ import com.fasterxml.jackson.module.scala.DefaultScalaModule
 // Import all services
 import the1.initiate.services._
 import the1.initiate.logging.GcsLogger
+import java.util.Properties
+import scala.io.Source
 
 /**
  * Main entry point for The1 Initiate Pipeline
@@ -291,10 +293,18 @@ object Main {
         }
       }
     )
-    
-    logger.info(s"Configuration loaded with ${config.tables.size} tables")
-    config
-  }
+    // import scala.collection.JavaConverters._
+
+    // val updatedTables = new java.util.ArrayList[TableConfig]()
+    // for (tableConfig <- config.tables) {
+    //   // process each table
+    //   updatedTables.add(processedTableConfig)
+    // }
+    // config = config.copy(tables = updatedTables.asScala.toSeq)
+
+      logger.info(s"Configuration loaded with ${config.tables.size} tables")
+      config
+    }
   
   /**
    * Get mapping file path for a table

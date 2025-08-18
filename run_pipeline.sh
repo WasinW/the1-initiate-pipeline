@@ -94,15 +94,16 @@ echo -e "${YELLOW}Submitting Dataproc batch job...${NC}"
 echo ""
 
 gcloud dataproc batches submit spark \
-    --project=$PROJECT_ID \
-    --region=$REGION \
-    --batch=$JOB_ID \
-    --subnet=$SUBNET \
-    --service-account=$SERVICE_ACCOUNT \
-    --jars=$JAR_PATH \
-    --class=the1.initiate.Main \
-    --properties="spark.executor.memory=4g,spark.executor.cores=2,spark.dynamicAllocation.enabled=true" \
-    -- gs://${BUCKET}/data-platform/bu/config/${TABLE_NAME}/job.yaml
+        --project=$PROJECT_ID \
+        --region=$REGION \
+        --batch=$JOB_ID \
+        --subnet=$SUBNET \
+        --service-account=$SERVICE_ACCOUNT \
+        --version="2.1" \
+        --jars=$JAR_PATH \
+        --class=the1.initiate.Main \
+        --properties="spark.executor.memory=4g,spark.executor.cores=4,spark.dynamicAllocation.enabled=true" \
+        -- gs://${BUCKET}/data-platform/bu/config/${TABLE_NAME}/job.yaml
 
 if [ $? -eq 0 ]; then
     echo ""

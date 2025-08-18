@@ -3,19 +3,17 @@ package the1.initiate.logging
 import com.google.cloud.storage.{BlobId, BlobInfo, Storage, StorageOptions}
 import java.time.{LocalDateTime, ZoneOffset}
 import java.time.format.DateTimeFormatter
-import scala.collection.mutable.ListBuffer
 import java.nio.charset.StandardCharsets
+import java.util.ArrayList  // ⭐ ใช้ Java ArrayList
+import scala.collection.JavaConverters._  // ⭐ สำหรับ convert
 
-/**
- * Logger that writes to both console and GCS
- */
 class GcsLogger(
   bucketName: String = "demo-central-the1",
   logPrefix: String = "data-platform/logs"
 ) {
   
   private val storage: Storage = StorageOptions.getDefaultInstance.getService
-  private val logs = ListBuffer[String]()
+  private val logs = new ArrayList[String]()  // ⭐ ใช้ Java ArrayList
   private val startTime = LocalDateTime.now()
   private val sessionId = s"${startTime.format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"))}_${System.currentTimeMillis}"
   
@@ -46,15 +44,12 @@ class GcsLogger(
       case _ => println(logLine)
     }
     
-    // Store for GCS
-    logs += logLine
+    // Store for GCS - ใช้ Java add() method
+    logs.add(logLine)  // ⭐ เปลี่ยนจาก += เป็น add()
   }
   
-  /**
-   * Flush logs to GCS
-   */
   def flush(tableName: String = "general"): Unit = {
-    if (logs.nonEmpty) {
+    if (!logs.isEmpty) {  // ⭐ ใช้ isEmpty() ของ Java
       try {
         val date = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy/MM/dd"))
         val fileName = s"$logPrefix/$date/${tableName}_$sessionId.log"
@@ -64,11 +59,12 @@ class GcsLogger(
           .setContentType("text/plain")
           .build()
         
-        val content = logs.mkString("\n").getBytes(StandardCharsets.UTF_8)
+        // Convert Java ArrayList to Scala และ join
+        val content = logs.asScala.mkString("\n").getBytes(StandardCharsets.UTF_8)  // ⭐ convert ด้วย asScala
         storage.create(blobInfo, content)
         
         println(s"Logs written to: gs://$bucketName/$fileName")
-        logs.clear()
+        logs.clear()  // ⭐ ใช้ clear() ของ Java
       } catch {
         case e: Exception =>
           System.err.println(s"Failed to write logs to GCS: ${e.getMessage}")
@@ -76,9 +72,6 @@ class GcsLogger(
     }
   }
   
-  /**
-   * Write execution summary
-   */
   def writeSummary(
     tableName: String,
     status: String,
