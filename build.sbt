@@ -1,4 +1,4 @@
-ThisBuild / scalaVersion := "2.12.19"
+ThisBuild / scalaVersion := "2.12.17"  // เปลี่ยนจาก 2.12.19
 
 lazy val root = (project in file("."))
   .settings(
@@ -13,11 +13,16 @@ lazy val root = (project in file("."))
       // Google Cloud Storage client
       "com.google.cloud" % "google-cloud-storage" % "2.29.1",
       
-      // Google Cloud Storage Transfer Service client
-      "com.google.cloud" % "google-cloud-storage-transfer" % "1.42.0",
+      // ⭐ อัพเดท Storage Transfer Service version
+      "com.google.cloud" % "google-cloud-storage-transfer" % "1.5.0",  // จาก 1.42.0
       
       // Google Cloud Secret Manager client
       "com.google.cloud" % "google-cloud-secretmanager" % "2.28.0",
+      
+      // เพิ่ม dependencies ที่จําเป็น
+      "com.google.protobuf" % "protobuf-java" % "3.25.1",
+      "io.grpc" % "grpc-core" % "1.59.0",
+      "io.grpc" % "grpc-protobuf" % "1.59.0",
       
       // Jackson for YAML and JSON parsing
       "com.fasterxml.jackson.dataformat" % "jackson-dataformat-yaml" % "2.17.0",
@@ -29,9 +34,15 @@ lazy val root = (project in file("."))
       "ch.qos.logback" % "logback-classic" % "1.4.8",
       "org.slf4j" % "slf4j-api" % "2.0.7",
       
-      // Testing (optional)
+      // Testing
       "org.scalatest" %% "scalatest" % "3.2.15" % Test,
       "org.mockito" %% "mockito-scala" % "1.17.12" % Test
+    ),
+    
+    // เพิ่ม resolvers
+    resolvers ++= Seq(
+      "Maven Central" at "https://repo1.maven.org/maven2/",
+      "Google Maven" at "https://maven.google.com/"
     ),
     
     // Assembly plugin settings
@@ -49,12 +60,15 @@ lazy val root = (project in file("."))
     
     assembly / assemblyJarName := s"${name.value}-${version.value}.jar",
     
-    // Java options
+    // Java options สําหรับ compatibility
     javacOptions ++= Seq("-source", "11", "-target", "11"),
     scalacOptions ++= Seq(
       "-deprecation",
       "-encoding", "UTF-8",
       "-feature",
-      "-unchecked"
+      "-unchecked",
+      "-target:jvm-1.8",  // เพิ่ม JVM target
+      "-language:postfixOps",
+      "-language:implicitConversions"
     )
   )
