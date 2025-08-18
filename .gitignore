@@ -2,3 +2,5 @@
 **/secrets*.yaml
 ..terraform*.terraform/
 *.exe
+./target/*
+.terraform*
