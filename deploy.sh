@@ -34,7 +34,7 @@ echo -e "${GREEN}Built: $JAR_FILE${NC}"
 
 # Step 2: Upload JAR to GCS
 echo -e "${YELLOW}Step 2: Uploading JAR to GCS...${NC}"
-JAR_GCS_PATH="gs://${BUCKET}/jars/$(basename $JAR_FILE)"
+JAR_GCS_PATH="gs://${BUCKET}/data-platform/framework/initiate/jars/$(basename $JAR_FILE)"
 gsutil cp $JAR_FILE $JAR_GCS_PATH
 
 if [ $? -ne 0 ]; then
@@ -45,13 +45,13 @@ echo -e "${GREEN}Uploaded to: $JAR_GCS_PATH${NC}"
 
 # Step 3: Upload configs to GCS
 echo -e "${YELLOW}Step 3: Uploading configs to GCS...${NC}"
-gsutil -m rsync -r config/ gs://${BUCKET}/config/
+gsutil -m rsync -r config/ gs://${BUCKET}/data-platform/bu/config/
 
 if [ $? -ne 0 ]; then
     echo -e "${RED}Failed to upload configs!${NC}"
     exit 1
 fi
-echo -e "${GREEN}Configs uploaded to: gs://${BUCKET}/config/${NC}"
+echo -e "${GREEN}Configs uploaded to: gs://${BUCKET}/data-platform/bu/config/${NC}"
 
 # Step 4: Create service directories in GCS if not exists
 echo -e "${YELLOW}Step 4: Creating service directories...${NC}"
@@ -74,8 +74,8 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
         --service-account=$SERVICE_ACCOUNT \
         --jar=$JAR_GCS_PATH \
         --class=the1.initiate.Main \
-        -- gs://${BUCKET}/config/${TABLE_NAME}/job.yaml
-    
+        -- gs://${BUCKET}/data-platform/bu/config/${TABLE_NAME}/job.yaml
+
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}Job submitted successfully!${NC}"
         echo -e "Job ID: ${JOB_ID}"
@@ -95,7 +95,7 @@ else
     echo "    --service-account=$SERVICE_ACCOUNT \\"
     echo "    --jar=$JAR_GCS_PATH \\"
     echo "    --class=the1.initiate.Main \\"
-    echo "    -- gs://${BUCKET}/config/TABLE_NAME/job.yaml${NC}"
+    echo "    -- gs://${BUCKET}/data-platform/bu/config/${TABLE_NAME}/job.yaml${NC}"
 fi
 
 echo ""
