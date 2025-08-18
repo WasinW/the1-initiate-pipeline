@@ -20,28 +20,28 @@ NC='\033[0m' # No Color
 echo -e "${GREEN}The1 Initiate Pipeline - Build & Deploy${NC}"
 echo "========================================"
 
-# Step 1: Clean and build
-echo -e "${YELLOW}Step 1: Building JAR...${NC}"
-sbt clean assembly
+# # Step 1: Clean and build
+# echo -e "${YELLOW}Step 1: Building JAR...${NC}"
+# sbt clean assembly
 
-if [ $? -ne 0 ]; then
-    echo -e "${RED}Build failed!${NC}"
-    exit 1
-fi
+# if [ $? -ne 0 ]; then
+#     echo -e "${RED}Build failed!${NC}"
+#     exit 1
+# fi
 
 JAR_FILE=$(ls target/scala-2.12/*-1.0.0.jar | head -n 1)
 echo -e "${GREEN}Built: $JAR_FILE${NC}"
 
-# Step 2: Upload JAR to GCS
-echo -e "${YELLOW}Step 2: Uploading JAR to GCS...${NC}"
-JAR_GCS_PATH="gs://${BUCKET}/data-platform/framework/initiate/jars/$(basename $JAR_FILE)"
-gsutil cp $JAR_FILE $JAR_GCS_PATH
+# # Step 2: Upload JAR to GCS
+# echo -e "${YELLOW}Step 2: Uploading JAR to GCS...${NC}"
+# JAR_GCS_PATH="gs://${BUCKET}/data-platform/framework/initiate/jars/$(basename $JAR_FILE)"
+# gsutil cp $JAR_FILE $JAR_GCS_PATH
 
-if [ $? -ne 0 ]; then
-    echo -e "${RED}Failed to upload JAR!${NC}"
-    exit 1
-fi
-echo -e "${GREEN}Uploaded to: $JAR_GCS_PATH${NC}"
+# if [ $? -ne 0 ]; then
+#     echo -e "${RED}Failed to upload JAR!${NC}"
+#     exit 1
+# fi
+# echo -e "${GREEN}Uploaded to: $JAR_GCS_PATH${NC}"
 
 # Step 3: Upload configs to GCS
 echo -e "${YELLOW}Step 3: Uploading configs to GCS...${NC}"
@@ -72,7 +72,7 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
         --batch=$JOB_ID \
         --subnet=$SUBNET \
         --service-account=$SERVICE_ACCOUNT \
-        --jar=$JAR_GCS_PATH \
+        --jars=$JAR_GCS_PATH \
         --class=the1.initiate.Main \
         -- gs://${BUCKET}/data-platform/bu/config/${TABLE_NAME}/job.yaml
 

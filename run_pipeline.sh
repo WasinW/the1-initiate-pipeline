@@ -65,7 +65,8 @@ echo -e "  ✓ $MAPPING_PATH"
 echo ""
 
 # Generate job ID
-JOB_ID="the1-${TABLE_NAME}-$(date +%Y%m%d-%H%M%S)"
+# JOB_ID="the1-${TABLE_NAME}-$(date +%Y%m%d-%H%M%S)"
+JOB_ID="the1-${TABLE_NAME//_/-}-$(date +%Y%m%d-%H%M%S)"
 JAR_PATH="gs://${BUCKET}/data-platform/framework/initiate/jars/the1-initiate-pipeline-${JAR_VERSION}.jar"
 
 echo -e "${YELLOW}Checking JAR file...${NC}"
@@ -98,7 +99,7 @@ gcloud dataproc batches submit spark \
     --batch=$JOB_ID \
     --subnet=$SUBNET \
     --service-account=$SERVICE_ACCOUNT \
-    --jar=$JAR_PATH \
+    --jars=$JAR_PATH \
     --class=the1.initiate.Main \
     --properties="spark.executor.memory=4g,spark.executor.cores=2,spark.dynamicAllocation.enabled=true" \
     -- gs://${BUCKET}/data-platform/bu/config/${TABLE_NAME}/job.yaml
