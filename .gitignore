@@ -1,3 +1,4 @@
 *.env
 **/secrets*.yaml
-..terraform*
+..terraform*.terraform/
+*.exe
