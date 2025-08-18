@@ -2,37 +2,22 @@ package the1.initiate
 
 import java.nio.file.{Files, Paths}
 import scala.collection.JavaConverters._
+import scala.util.{Try, Success, Failure}
 import com.fasterxml.jackson.databind.{ObjectMapper, DeserializationFeature}
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory
+import com.fasterxml.jackson.module.scala.DefaultScalaModule
 
-// Google Cloud clients
-import com.google.cloud.bigquery.{BigQuery, BigQueryOptions, TableId}
-import com.google.cloud.storage.transfer.v1.{StorageTransferServiceClient}
-// Additional imports for STS transfer job definition
-import com.google.cloud.secretmanager.v1.{SecretManagerServiceClient, SecretVersionName}
-import com.google.storagetransfer.v1.proto.TransferTypes.{AwsAccessKey}
-// Additional STS classes used in runStsCopy
-import com.google.storagetransfer.v1.proto.TransferTypes.{AwsS3Data, GcsData, ObjectConditions, TransferOptions}
-import com.google.storagetransfer.v1.proto.{TransferSpec, Schedule, TransferJob, TransferJob => ProtoTransferJob, CreateTransferJobRequest}
-import com.google.type.{Date => ProtoDate, TimeOfDay}
+// Import all services
+import the1.initiate.services._
+import the1.initiate.logging.GcsLogger
 
 /**
- * Entry point for the initiation pipeline.  This Spark driver (though Spark
- * functionality is not used) reads a YAML configuration file describing
- * tables to migrate, orchestrates a Storage Transfer Service (STS) copy from
- * AWS S3 to GCS, creates or refreshes BigLake external tables, loads data into
- * managed BigQuery tables and performs validation.
- *
- * The implementation here is intentionally light; replace the stubbed
- * methods with your own logic to integrate with Glue/Athena, STS, BigQuery
- * and Redshift as required.  Use this as a scaffold for your own code.
+ * Main entry point for The1 Initiate Pipeline
+ * Full implementation with all services integrated
  */
 object Main {
 
-  /**
-    * Configuration model representing the YAML file.  Only a subset of
-    * fields is defined here; feel free to extend with additional options.
-    */
+  // Configuration classes
   case class Config(
     projectId: String,
     datasetExternal: String,
@@ -40,8 +25,11 @@ object Main {
     gcsBucket: String,
     defaultEngine: String,
     tables: Seq[TableConfig],
-    validation: ValidationConfig
+    validation: ValidationConfig,
+    connectionId: String = "demo_gcs_iceberg_connection",
+    region: String = "asia-southeast1"
   )
+  
   case class TableConfig(
     name: String,
     source: SourceConfig,
@@ -49,296 +37,290 @@ object Main {
     engineOverrides: Option[EngineOverrides] = None,
     thresholds: Option[Thresholds] = None
   )
+  
   case class SourceConfig(
     s3Bucket: String,
     prefix: String,
     format: String,
-    schemaSource: String,
-    glue: Option[GlueConfig] = None
+    schemaSource: String = "mapping"
   )
-  case class GlueConfig(database: String, table: String)
+  
   case class DestinationConfig(
     gcsPrefix: String,
     biglake: BigLakeConfig,
     finalTable: FinalTableConfig,
-    columnMapping: Seq[ColumnMapping]
+    columnMapping: Seq[ColumnMapping] = Seq.empty
   )
-  case class BigLakeConfig(hivePartitioning: Boolean, hivePartitionUriPrefix: String)
+  
+  case class BigLakeConfig(
+    hivePartitioning: Boolean,
+    hivePartitionUriPrefix: String
+  )
+  
   case class FinalTableConfig(dataset: String, table: String)
   case class ColumnMapping(expr: String, as: String)
   case class EngineOverrides(preferred: String, fallbacks: Seq[String])
   case class Thresholds(maxSingleObjectTiB: Int, minCompactTargetMB: Int)
-  case class ValidationConfig(compareWith: String, checksumColumns: Seq[String], sampleRatio: Double)
+  case class ValidationConfig(
+    compareWith: String,
+    checksumColumns: Seq[String],
+    sampleRatio: Double
+  )
 
   def main(args: Array[String]): Unit = {
     if (args.length < 1) {
       System.err.println("Usage: Main <path_to_job.yaml>")
       System.exit(1)
     }
+    
     val configPath = args(0)
-    val config = loadConfig(configPath)
-    // initialise clients
-    val bigQuery: BigQuery = BigQueryOptions.newBuilder().setProjectId(config.projectId).build().getService
-    val stsClient: StorageTransferServiceClient = StorageTransferServiceClient.create()
-
-    // Loop through tables in the config
-    config.tables.foreach { tableCfg =>
-      println(s"Processing table ${tableCfg.name} …")
-      // 1. Read schema
-      val schema = readSourceSchema(tableCfg)
-      // 2. Create or refresh external table
-      createOrRefreshExternalTable(bigQuery, config, tableCfg, schema)
-      // 3. Copy data via STS
-      runStsCopy(config, tableCfg, stsClient)
-      // 4. Refresh external table again after copy
-      createOrRefreshExternalTable(bigQuery, config, tableCfg, schema)
-      // 5. Load into final table
-      loadIntoFinalTable(bigQuery, config, tableCfg)
-      // 6. Validate counts and values
-      validateSourceAndTarget(config, tableCfg)
-    }
-
-    stsClient.close()
-  }
-
-  /**
-    * Parse YAML configuration file into our Config case class.  Uses Jackson
-    * YAML module.  Unknown properties in the YAML are ignored so you can
-    * extend the file without updating the code.
-    */
-  def loadConfig(path: String): Config = {
-    val mapper = new ObjectMapper(new YAMLFactory())
-    mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
-    val bytes = Files.readAllBytes(Paths.get(path))
-    mapper.readValue(bytes, classOf[Config])
-  }
-
-  /**
-    * Read the source schema either from AWS Glue/Athena or by inferring it
-    * from sample Parquet files on S3.  This implementation is a placeholder;
-    * you'll need to add AWS SDK calls and schema conversion logic.
-    */
-  def readSourceSchema(tableCfg: TableConfig): String = {
-    tableCfg.source.schemaSource.toLowerCase match {
-      case "glue" =>
-        // TODO: implement Glue catalog retrieval
-        println(s"Retrieving schema for ${tableCfg.name} from Glue …")
-        "id INT64, value STRING" // return a BigQuery SQL schema string or similar representation
-      case "infer" =>
-        // TODO: sample S3 files and infer schema using Parquet/Arrow
-        println(s"Inferring schema for ${tableCfg.name} from S3 samples …")
-        "id INT64, value STRING"
-      case other =>
-        throw new IllegalArgumentException(s"Unsupported schemaSource: $other")
+    val logger = new GcsLogger()
+    val startTime = System.currentTimeMillis()
+    
+    try {
+      logger.info(s"Starting The1 Initiate Pipeline")
+      logger.info(s"Config: $configPath")
+      
+      // Load and enhance configuration
+      val config = loadAndEnhanceConfig(configPath, logger)
+      
+      // Initialize services
+      val stsService = new StsService(config.projectId, logger)
+      val schemaService = new SchemaService(logger)
+      val bigQueryService = new BigQueryService(config.projectId, logger)
+      val validationService = new ValidationService(config.projectId, bigQueryService, logger)
+      
+      // Process each table
+      config.tables.foreach { tableConfig =>
+        processTable(
+          config, 
+          tableConfig, 
+          stsService, 
+          schemaService, 
+          bigQueryService, 
+          validationService,
+          logger
+        )
+      }
+      
+      // Clean up
+      stsService.close()
+      
+      val duration = (System.currentTimeMillis() - startTime) / 1000
+      logger.info(s"Pipeline completed successfully in ${duration}s")
+      
+    } catch {
+      case e: Exception =>
+        logger.error(s"Pipeline failed", e)
+        logger.flush("error")
+        System.exit(1)
     }
   }
-
+  
   /**
-    * Create or refresh a BigLake external table pointing at the destination GCS
-    * prefix.  The schema should be converted to a BigQuery Schema if
-    * necessary.  Here we simply print out a DDL; in your production code,
-    * invoke the BigQuery client and run the DDL.
-    */
-  def createOrRefreshExternalTable(bigQuery: BigQuery, cfg: Config, tableCfg: TableConfig, schema: String): Unit = {
-    val extTableId = TableId.of(cfg.datasetExternal, s"${tableCfg.name}_ext")
-    val gcsUri = s"gs://${cfg.gcsBucket}/${tableCfg.destination.gcsPrefix}*"
-    // Build a CREATE OR REPLACE EXTERNAL TABLE statement
-    val ddl =
-      s"""
-         |CREATE OR REPLACE EXTERNAL TABLE `${extTableId.getDataset}.${extTableId.getTable}`
-         |WITH CONNECTION `REGION.${cfg.projectId}.connection`
-         |OPTIONS (
-         |  format = '${tableCfg.source.format.toUpperCase}',
-         |  uris = ['$gcsUri'],
-         |  hive_partition_uri_prefix = 'gs://${cfg.gcsBucket}/${tableCfg.destination.gcsPrefix}',
-         |  require_hive_partition_filter = false
-         |) AS SELECT * FROM UNNEST([])
-         |""".stripMargin
-    println(s"Executing DDL for external table ${extTableId.getTable}:\n$ddl")
-    // TODO: use bigQuery.query() to execute the DDL
-  }
-
-  /**
-    * Trigger a Storage Transfer Service job to copy objects from S3 to GCS.
-    * You should build a TransferJob definition, specifying the source S3
-    * bucket, credentials stored in Secret Manager, and the destination GCS
-    * bucket/prefix.  Use overwriteWhenDifferent to make it idempotent.
-    */
-  def runStsCopy(cfg: Config, tableCfg: TableConfig, stsClient: StorageTransferServiceClient): Unit = {
-    println(s"Starting STS copy for ${tableCfg.name} from s3://${tableCfg.source.s3Bucket}/${tableCfg.source.prefix} to \n" +
-      s"gs://${cfg.gcsBucket}/${tableCfg.destination.gcsPrefix} …")
-
-    // ---------------------------------------------------------------------------
-    // Retrieve AWS credentials from Secret Manager.  This implementation assumes
-    // two secrets exist in the same project: "aws-access-key-id" and
-    // "aws-secret-access-key".  Each secret should have at least one version
-    // with the AWS key/secret as plain text.  In production you may want to
-    // parameterise the secret names or include them in the YAML config.
-    // ---------------------------------------------------------------------------
-    val secretClient = SecretManagerServiceClient.create()
-    def getSecretPayload(secretName: String): String = {
-      // Build the resource name for the latest version of the secret
-      val secretVersion = SecretVersionName.of(cfg.projectId, secretName, "latest")
-      val response = secretClient.accessSecretVersion(secretVersion)
-      response.getPayload.getData.toStringUtf8.trim
-    }
-    val awsAccessKeyId: String = getSecretPayload("aws-access-key-id")
-    val awsSecretAccessKey: String = getSecretPayload("aws-secret-access-key")
-    secretClient.close()
-
-    // ---------------------------------------------------------------------------
-    // Build the AWS S3 data source.  The bucket name comes from the config and
-    // the optional path is used to scope the transfer to a prefix.  If the
-    // prefix is empty then the entire bucket will be copied.  Note that the
-    // AWS access key and secret are injected here.
-    // ---------------------------------------------------------------------------
-    val awsAccessKey: AwsAccessKey = AwsAccessKey.newBuilder()
-      .setAccessKeyId(awsAccessKeyId)
-      .setSecretAccessKey(awsSecretAccessKey)
-      .build()
-    val awsSource: AwsS3Data = AwsS3Data.newBuilder()
-      .setBucketName(tableCfg.source.s3Bucket)
-      // Set an empty path when no prefix is provided
-      .setPath(
-        if (tableCfg.source.prefix != null && tableCfg.source.prefix.nonEmpty)
-          tableCfg.source.prefix
-        else ""
+   * Process a single table migration
+   */
+  private def processTable(
+    config: Config,
+    tableConfig: TableConfig,
+    stsService: StsService,
+    schemaService: SchemaService,
+    bigQueryService: BigQueryService,
+    validationService: ValidationService,
+    logger: GcsLogger
+  ): Unit = {
+    
+    val tableName = tableConfig.name
+    logger.info(s"Processing table: $tableName")
+    
+    try {
+      // 1. Get schema from mapping file
+      val mappingPath = getMappingPath(config, tableConfig)
+      val schema = schemaService.generateBigQuerySchema(mappingPath)
+      val columnExpression = schemaService.generateColumnSelectExpression(mappingPath)
+      
+      logger.info(s"Schema discovered with ${schema.split("\n").length} columns")
+      
+      // 2. Create managed table if not exists
+      if (!bigQueryService.tableExists(config.datasetFinal, tableName)) {
+        logger.info(s"Creating managed table: ${config.datasetFinal}.$tableName")
+        bigQueryService.createManagedTable(
+          config.datasetFinal,
+          tableName,
+          schema,
+          config.gcsBucket,
+          s"biglake/raw_$tableName",
+          config.connectionId,
+          config.region
+        ) match {
+          case Success(_) => logger.info("Managed table created successfully")
+          case Failure(e) => throw new RuntimeException(s"Failed to create managed table", e)
+        }
+      }
+      
+      // 3. Run STS transfer
+      logger.info(s"Starting STS transfer for $tableName")
+      stsService.executeTransfer(
+        tableConfig.source.s3Bucket,
+        tableConfig.source.prefix,
+        config.gcsBucket,
+        tableConfig.destination.gcsPrefix
+      ) match {
+        case Success(jobName) => 
+          logger.info(s"STS transfer completed: $jobName")
+        case Failure(e) => 
+          throw new RuntimeException(s"STS transfer failed", e)
+      }
+      
+      // 4. Create/refresh external table
+      logger.info(s"Creating external table for $tableName")
+      bigQueryService.createOrRefreshExternalTable(
+        config.datasetExternal,
+        tableName,
+        config.gcsBucket,
+        tableConfig.destination.gcsPrefix,
+        tableConfig.source.format,
+        config.connectionId,
+        config.region
+      ) match {
+        case Success(_) => logger.info("External table created/refreshed")
+        case Failure(e) => throw new RuntimeException(s"Failed to create external table", e)
+      }
+      
+      // 5. Load data into managed table
+      logger.info(s"Loading data into managed table")
+      val loadMode = if (tableConfig.source.prefix.contains("delta")) "MERGE" else "TRUNCATE"
+      
+      bigQueryService.loadIntoManagedTable(
+        config.datasetExternal,
+        tableName,
+        config.datasetFinal,
+        tableName,
+        columnExpression,
+        loadMode
+      ) match {
+        case Success(rowsAffected) => 
+          logger.info(s"Data loaded successfully. Rows affected: $rowsAffected")
+        case Failure(e) => 
+          throw new RuntimeException(s"Failed to load data", e)
+      }
+      
+      // 6. Validate
+      logger.info(s"Validating data transfer")
+      val validationResult = validationService.validateTransfer(
+        config.datasetExternal,
+        tableName,
+        config.datasetFinal,
+        tableName,
+        config.validation.checksumColumns
       )
-      .setAwsAccessKey(awsAccessKey)
-      .build()
-
-    // ---------------------------------------------------------------------------
-    // Build the GCS data sink.  The bucket name and prefix come from the config.
-    // When specifying a path (prefix) here, STS will write objects into that
-    // prefix, preserving any subdirectories from the source.  Omitting the path
-    // writes to the root of the bucket.
-    // ---------------------------------------------------------------------------
-    val gcsSink: GcsData = GcsData.newBuilder()
-      .setBucketName(cfg.gcsBucket)
-      .setPath(tableCfg.destination.gcsPrefix)
-      .build()
-
-    // ---------------------------------------------------------------------------
-    // Configure which objects to include.  STS filters on prefixes rather than
-    // suffixes.  Here we include a single prefix (the same as the path on the
-    // AWS source) so that reruns copy only the relevant sub-tree.  If you need
-    // to include multiple prefixes, call addIncludePrefixes for each.
-    // ---------------------------------------------------------------------------
-    val objectConditions: ObjectConditions = ObjectConditions.newBuilder()
-      .addIncludePrefixes(tableCfg.source.prefix)
-      .build()
-
-    // ---------------------------------------------------------------------------
-    // Transfer options control behaviour when files already exist at the sink.
-    // Setting overwriteWhenDifferent to true makes the job idempotent: on a
-    // rerun, STS will replace objects that have changed and skip unchanged ones.
-    // Delete options are disabled here because we do not want to remove any
-    // objects after the transfer completes.
-    // ---------------------------------------------------------------------------
-    val transferOptions: TransferOptions = TransferOptions.newBuilder()
-      .setOverwriteWhenDifferent(true)
-      .setDeleteObjectsFromSourceAfterTransfer(false)
-      .setDeleteObjectsUniqueInSink(false)
-      .build()
-
-    // ---------------------------------------------------------------------------
-    // Assemble the transfer specification with the S3 source, the GCS sink,
-    // object conditions and transfer options.
-    // ---------------------------------------------------------------------------
-    val transferSpec: TransferSpec = TransferSpec.newBuilder()
-      .setAwsS3DataSource(awsSource)
-      .setGcsDataSink(gcsSink)
-      .setObjectConditions(objectConditions)
-      .setTransferOptions(transferOptions)
-      .build()
-
-    // ---------------------------------------------------------------------------
-    // Define a schedule that starts immediately and ends on the same day.  STS
-    // requires a start date/time and an end date even for one-off jobs.  The
-    // LocalDate and LocalTime classes are used to obtain the current UTC date
-    // and time, which are converted to the protobuf Date and TimeOfDay types.
-    // ---------------------------------------------------------------------------
-    val now = java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC)
-    val startDate: ProtoDate = ProtoDate.newBuilder()
-      .setYear(now.getYear)
-      .setMonth(now.getMonthValue)
-      .setDay(now.getDayOfMonth)
-      .build()
-    val timeOfDay: TimeOfDay = TimeOfDay.newBuilder()
-      .setHours(now.getHour)
-      .setMinutes(now.getMinute)
-      .setSeconds(now.getSecond)
-      .build()
-    val schedule: Schedule = Schedule.newBuilder()
-      .setScheduleStartDate(startDate)
-      .setScheduleEndDate(startDate)
-      .setStartTimeOfDay(timeOfDay)
-      .build()
-
-    // ---------------------------------------------------------------------------
-    // Build the TransferJob.  The name is left unset so that the server
-    // automatically generates it.  We set the status to ENABLED so that the job
-    // runs as soon as it's created.  The description can be any helpful text.
-    // ---------------------------------------------------------------------------
-    val transferJob: ProtoTransferJob = ProtoTransferJob.newBuilder()
-      .setProjectId(cfg.projectId)
-      .setDescription(s"Initial data migration for table ${tableCfg.name}")
-      .setTransferSpec(transferSpec)
-      .setSchedule(schedule)
-      .setStatus(ProtoTransferJob.Status.ENABLED)
-      .build()
-
-    // Create the request and submit it.  The StorageTransferServiceClient is a
-    // lightweight wrapper around the underlying gRPC client.  Once the job is
-    // created, its name will be returned.  STS jobs are asynchronous: the
-    // create call returns immediately, while the job executes in the background.
-    val request: CreateTransferJobRequest =
-      CreateTransferJobRequest.newBuilder().setTransferJob(transferJob).build()
-    val response: TransferJob = stsClient.createTransferJob(request)
-    println(s"Created STS transfer job ${response.getName} for table ${tableCfg.name}")
-
-    // ---------------------------------------------------------------------------
-    // Optional: poll until the transfer job completes.  For a one-off job, you
-    // can wait for the operation associated with the first run to finish.  In
-    // more advanced pipelines you might track job status via Cloud Logging.
-    // ---------------------------------------------------------------------------
-    // Note: Storage Transfer Service API exposes long-running operations for each
-    // transfer run.  The transfer job name ends with "jobs/NNN".  To get the
-    // operation, use TransferJobServiceClient.runTransferJob or check the
-    // operations API.  Polling is omitted here for brevity.
-
-    // TODO: Build and run TransferJob; see Google Cloud Storage Transfer Service examples
-    println(s"Would construct TransferJob here using $awsAccessKey and run via stsClient …")
+      
+      if (!validationResult.isValid) {
+        throw new RuntimeException(s"Validation failed: ${validationResult.issues.mkString(", ")}")
+      }
+      
+      // 7. Write summary
+      val duration = "N/A" // Calculate if needed
+      logger.writeSummary(
+        tableName,
+        status = "SUCCESS",
+        rowsTransferred = validationResult.targetCount,
+        duration = duration,
+        errors = Seq.empty
+      )
+      
+    } catch {
+      case e: Exception =>
+        logger.error(s"Failed to process table $tableName", e)
+        logger.writeSummary(
+          tableName,
+          status = "FAILED",
+          errors = Seq(e.getMessage)
+        )
+        throw e
+    }
   }
-
+  
   /**
-    * Load data from the external table into the final managed table.  Use
-    * INSERT, MERGE or LOAD DATA statements depending on your needs.  At this
-    * stage you can apply the columnMapping defined in your job YAML or in
-    * mapping.json.  Here we simply print a pseudo‑DML.
-    */
-  def loadIntoFinalTable(bigQuery: BigQuery, cfg: Config, tableCfg: TableConfig): Unit = {
-    val extTableName = s"${cfg.datasetExternal}.${tableCfg.name}_ext"
-    val finalTableName = s"${cfg.datasetFinal}.${tableCfg.name}"
-    val columnExprs = if (tableCfg.destination.columnMapping.isEmpty) "*" else tableCfg.destination.columnMapping.map(cm => s"${cm.expr} AS ${cm.as}").mkString(",")
-    val dml =
-      s"""
-         |INSERT INTO `${finalTableName}`
-         |SELECT ${columnExprs}
-         |FROM `${extTableName}`
-         |""".stripMargin
-    println(s"Executing load into final table:\n$dml")
-    // TODO: bigQuery.query(QueryJobConfiguration.newBuilder(dml).build())
+   * Load configuration and enhance with mapping.json
+   */
+  private def loadAndEnhanceConfig(configPath: String, logger: GcsLogger): Config = {
+    logger.info("Loading configuration")
+    
+    val mapper = new ObjectMapper(new YAMLFactory())
+    mapper.registerModule(DefaultScalaModule)
+    mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+    
+    val configContent = if (configPath.startsWith("gs://")) {
+      readFromGcs(configPath)
+    } else {
+      new String(Files.readAllBytes(Paths.get(configPath)))
+    }
+    
+    var config = mapper.readValue(configContent, classOf[Config])
+    
+    // Enhance each table config with mapping.json
+    config = config.copy(
+      tables = config.tables.map { tableConfig =>
+        val mappingPath = getMappingPath(config, tableConfig)
+        if (Files.exists(Paths.get(mappingPath)) || mappingPath.startsWith("gs://")) {
+          logger.info(s"Loading mapping for ${tableConfig.name} from $mappingPath")
+          val mappingContent = if (mappingPath.startsWith("gs://")) {
+            readFromGcs(mappingPath)
+          } else {
+            new String(Files.readAllBytes(Paths.get(mappingPath)))
+          }
+          
+          // Parse mapping.json
+          case class MappingFile(
+            selectedColumns: Seq[String],
+            columnMapping: Seq[ColumnMapping]
+          )
+          
+          val mapping = mapper.readValue(mappingContent, classOf[MappingFile])
+          
+          // Update destination with column mapping
+          tableConfig.copy(
+            destination = tableConfig.destination.copy(
+              columnMapping = mapping.columnMapping
+            )
+          )
+        } else {
+          logger.warn(s"No mapping file found for ${tableConfig.name}")
+          tableConfig
+        }
+      }
+    )
+    
+    logger.info(s"Configuration loaded with ${config.tables.size} tables")
+    config
   }
-
+  
   /**
-    * Validate that the row counts and basic statistics match between the
-    * external table and the source system.  You could extend this to run
-    * checksums on selected columns【451817110495529†L329-L349】.  This stub prints a message.
-    */
-  def validateSourceAndTarget(cfg: Config, tableCfg: TableConfig): Unit = {
-    println(s"Validating ${tableCfg.name} … (stub)")
-    // TODO: query BigQuery and source system, compare counts and checksums
+   * Get mapping file path for a table
+   */
+  private def getMappingPath(config: Config, tableConfig: TableConfig): String = {
+    // Assume mapping.json is in same directory as job.yaml
+    if (tableConfig.source.schemaSource == "mapping") {
+      s"config/${tableConfig.name}/mapping.json"
+    } else {
+      s"config/${tableConfig.name}/mapping.json"
+    }
   }
-
+  
+  /**
+   * Read file from GCS
+   */
+  private def readFromGcs(gcsPath: String): String = {
+    import com.google.cloud.storage.{Storage, StorageOptions}
+    
+    val parts = gcsPath.replace("gs://", "").split("/", 2)
+    val bucketName = parts(0)
+    val blobName = parts(1)
+    
+    val storage = StorageOptions.getDefaultInstance.getService
+    val blob = storage.get(bucketName, blobName)
+    
+    new String(blob.getContent(), "UTF-8")
+  }
 }
