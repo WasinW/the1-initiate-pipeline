@@ -1,7 +1,7 @@
 ThisBuild / scalaVersion := "2.12.19"
 
-lazy val root = (project in file(".")).
-  settings(
+lazy val root = (project in file("."))
+  .settings(
     name := "the1-initiate-pipeline",
     organization := "com.example",
     version := "1.0.0",
@@ -48,11 +48,6 @@ lazy val root = (project in file(".")).
     },
     
     assembly / assemblyJarName := s"${name.value}-${version.value}.jar",
-    
-    // Exclude Scala library from assembly (Dataproc provides it)
-    assembly / assemblyOption := (assembly / assemblyOption).value.copy(
-      includeScala = false
-    ),
     
     // Java options
     javacOptions ++= Seq("-source", "11", "-target", "11"),

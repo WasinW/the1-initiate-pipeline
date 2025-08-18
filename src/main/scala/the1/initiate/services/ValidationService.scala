@@ -24,7 +24,8 @@ class ValidationService(
     sourceCount: Long,
     targetCount: Long,
     countMatch: Boolean,
-    checksumMatch: Option[Boolean] = None,
+    // checksumMatch: Option[Boolean] = None,
+    checksumMatch: scala.Option[Boolean] = None,
     issues: Seq[String] = Seq.empty
   )
   
@@ -71,12 +72,19 @@ class ValidationService(
         targetDataset, targetTable,
         checksumColumns
       ) match {
-        case Success((match, checkIssues)) =>
-          issues ++= checkIssues
-          Some(match)
+        // case Success((match, checkIssues)) =>
+        //   issues ++= checkIssues
+        //   Some(match)
+        // case Failure(e) =>
+        //   issues += s"Checksum validation failed: ${e.getMessage}"
+        //   Some(false)
+        case Success((isMatch, checkIssues)) =>
+        issues ++= checkIssues
+        Some(isMatch)
         case Failure(e) =>
-          issues += s"Checksum validation failed: ${e.getMessage}"
-          Some(false)
+        issues += s"Checksum validation failed: ${e.getMessage}"
+        Some(false)
+
       }
     } else {
       None

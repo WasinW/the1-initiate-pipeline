@@ -4,6 +4,7 @@ import com.google.cloud.bigquery._
 import scala.collection.JavaConverters._
 import scala.util.{Try, Success, Failure}
 import the1.initiate.logging.GcsLogger
+import com.google.cloud.bigquery.JobStatistics.QueryStatistics
 
 /**
  * Service for handling all BigQuery operations
@@ -177,7 +178,9 @@ class BigQueryService(projectId: String, logger: GcsLogger) {
         throw new RuntimeException(s"Query failed: ${error.getMessage}")
       } else {
         val stats = completedJob.getStatistics.asInstanceOf[QueryStatistics]
-        val rowsAffected = Option(stats.getNumDmlAffectedRows).map(_.longValue()).getOrElse(0L)
+        // val rowsAffected = Option(stats.getNumDmlAffectedRows).map(_.longValue()).getOrElse(0L)
+        // ใช้ scala.Option แทน
+        val rowsAffected = scala.Option(stats.getNumDmlAffectedRows).map(_.longValue()).getOrElse(0L)
         logger.info(s"DML executed successfully. Rows affected: $rowsAffected")
         rowsAffected
       }
